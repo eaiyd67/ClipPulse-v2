@@ -26,7 +26,12 @@ jobs:
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
 
       - name: Generate ClipPulse Android Project
-        run: python3 build_project.py
+        run: |
+          if [ ! -f "build_project.py" ]; then
+            echo "ERROR: build_project.py is not committed yet. Commit build_project.py to trigger the APK build."
+            exit 1
+          fi
+          python3 build_project.py
 
       - name: Setup Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
@@ -37,9 +42,8 @@ jobs:
         run: |
           set -o pipefail
           gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log || {
-            echo "==================== BUILD FAILURE SUMMARY ===================="
+            echo "==================== KOTLIN / GRADLE ERROR SUMMARY ===================="
             grep -E "(^e: |FAILURE:|What went wrong:|Execution failed|Unresolved reference|Manifest merger failed)" build.log | head -n 60
-            tail -n 35 build.log
             exit 1
           }
 
