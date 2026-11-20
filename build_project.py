@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ClipPulse v2.0.0 Complete Android Project Generator."""
+"""ClipPulse v2.1.0 Complete Android Project Generator."""
 import os
 import sys
 
@@ -71,8 +71,8 @@ android {
         applicationId = "com.clippulse.studio"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "2.0.0"
+        versionCode = 5
+        versionName = "2.1.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86") }
     }
     buildTypes {
@@ -111,6 +111,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.media3:media3-exoplayer:1.4.1")
@@ -225,7 +226,6 @@ class ClipPulseApp : Application() {
         }
         appScope.launch {
             EngineInitializer.ensureInitialized(this@ClipPulseApp)
-            // Automatically refresh yt-dlp binary once per day to prevent YouTube 403/SABR blocks
             EngineInitializer.autoUpdateIfStale(this@ClipPulseApp)
         }
     }
@@ -363,6 +363,12 @@ data class VideoAnalysisResult(
 
 enum class ExportMode(val label: String) { FAST_COPY("Fast Cut"), VERTICAL_CROP("9:16 Crop") }
 
+enum class StoragePreset(val label: String, val relativeSubdir: String) {
+    MOVIES("Movies/ClipPulse", "Movies/ClipPulse"),
+    DOWNLOADS("Download/ClipPulse", "Download/ClipPulse"),
+    DCIM("DCIM/ClipPulse", "DCIM/ClipPulse")
+}
+
 enum class DownloadQuality(val label: String, val formatSelector: String) {
     Q_1080P("1080p HD", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/bv*[height<=1080]+ba/b[height<=1080]/best"),
     Q_720P("720p HD", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/bv*[height<=720]+ba/b[height<=720]/best"),
@@ -417,6 +423,7 @@ object TimeFormatter {
 package com.clippulse.studio.data
 
 import android.content.Context
+import android.net.Uri
 import com.clippulse.studio.model.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -425,10 +432,15 @@ import java.io.File
 data class DownloadSettings(
     val quality: DownloadQuality = DownloadQuality.Q_1080P,
     val exportMode: ExportMode = ExportMode.FAST_COPY,
+    val storagePreset: StoragePreset = StoragePreset.MOVIES,
+    val customTreeUri: String? = null,
+    val customTreeLabel: String? = null,
     val burnSuperChatOverlay: Boolean = true,
     val loudnormEnabled: Boolean = true,
     val includeTxtNotes: Boolean = true
-)
+) {
+    fun activeDestinationLabel(): String = customTreeLabel?.takeIf { it.isNotBlank() } ?: "Internal Storage / ${storagePreset.relativeSubdir}"
+}
 
 class AiConfigStore(context: Context) {
     private val appCtx = context.applicationContext
@@ -462,7 +474,6 @@ class AiConfigStore(context: Context) {
             .apply()
     }
 
-    // Persistent Cookies.txt Login Support
     fun getCookiesFile(): File? {
         val f = File(appCtx.filesDir, "yt_cookies.txt")
         return if (f.exists() && f.length() > 10L) f else null
@@ -482,9 +493,13 @@ class AiConfigStore(context: Context) {
     fun loadDownloadSettings(): DownloadSettings {
         val q = runCatching { DownloadQuality.valueOf(prefs.getString("dl_quality", DownloadQuality.Q_1080P.name)!!) }.getOrDefault(DownloadQuality.Q_1080P)
         val m = runCatching { ExportMode.valueOf(prefs.getString("dl_mode", ExportMode.FAST_COPY.name)!!) }.getOrDefault(ExportMode.FAST_COPY)
+        val sp = runCatching { StoragePreset.valueOf(prefs.getString("dl_storage_preset", StoragePreset.MOVIES.name)!!) }.getOrDefault(StoragePreset.MOVIES)
         return DownloadSettings(
             quality = q,
             exportMode = m,
+            storagePreset = sp,
+            customTreeUri = prefs.getString("dl_tree_uri", null),
+            customTreeLabel = prefs.getString("dl_tree_label", null),
             burnSuperChatOverlay = prefs.getBoolean("dl_sc_overlay", true),
             loudnormEnabled = prefs.getBoolean("dl_loudnorm", true),
             includeTxtNotes = prefs.getBoolean("dl_txt", true)
@@ -495,13 +510,15 @@ class AiConfigStore(context: Context) {
         prefs.edit()
             .putString("dl_quality", s.quality.name)
             .putString("dl_mode", s.exportMode.name)
+            .putString("dl_storage_preset", s.storagePreset.name)
+            .putString("dl_tree_uri", s.customTreeUri)
+            .putString("dl_tree_label", s.customTreeLabel)
             .putBoolean("dl_sc_overlay", s.burnSuperChatOverlay)
             .putBoolean("dl_loudnorm", s.loudnormEnabled)
             .putBoolean("dl_txt", s.includeTxtNotes)
             .apply()
     }
 
-    // Persistent Scan History Cache
     fun saveScanToHistory(res: VideoAnalysisResult) {
         val existing = loadScanHistory().filterNot { it.sourceUrlOrUri == res.sourceUrlOrUri }.toMutableList()
         existing.add(0, res)
@@ -627,6 +644,11 @@ class AiConfigStore(context: Context) {
                 if (cleaned.endsWith(suffix, ignoreCase = true)) cleaned = cleaned.dropLast(suffix.length).trimEnd('/')
             }
             return cleaned
+        }
+
+        fun extractTreeFolderLabel(treeUri: Uri): String {
+            val last = Uri.decode(treeUri.lastPathSegment ?: "Custom Folder")
+            return last.replace("primary:", "Internal Storage / ").replace(":", " / ")
         }
     }
 }
@@ -851,7 +873,6 @@ object UrlNormalizer {
     }
 
     fun sanitizeErrorMessage(raw: String): String {
-        // Strip massive 1500-char googlevideo.com URLs from yt-dlp/ffmpeg stderr
         val noLongUrls = raw.replace(Regex("""https?://\S{70,}"""), "[stream-url]")
         val lines = noLongUrls.lineSequence()
             .map { it.trim() }
@@ -941,7 +962,6 @@ object StreamPreviewResolver {
         EngineInitializer.ensureInitialized(context).getOrThrow()
         val cookiesFile = AiConfigStore(context).getCookiesFile()
 
-        // Try web-compatible clients first so ExoPlayer does not get a c=ANDROID token-locked URL (403 Forbidden)
         val clientProfiles = listOf("tv_embedded,mweb", "ios,web", "default")
         var lastError = "Could not load stream preview"
 
@@ -995,9 +1015,6 @@ import java.io.File
 import java.io.FileOutputStream
 
 object SuperChatOverlayRenderer {
-    /**
-     * Renders a crisp YouTube-style tiered Super Chat card PNG for FFmpeg overlay compositing.
-     */
     fun renderCardPng(sc: SuperChatEvent, outFile: File): File {
         val width = 680
         val hasMsg = sc.message.isNotBlank()
@@ -1017,18 +1034,15 @@ object SuperChatOverlayRenderer {
         val canvas = Canvas(bmp)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-        // Shadow & full card rounded background
         paint.color = if (hasMsg) bodyColor else headerColor
         canvas.drawRoundRect(RectF(4f, 4f, width - 4f, height - 4f), 22f, 22f, paint)
 
-        // Header bar
         paint.color = headerColor
         canvas.drawRoundRect(RectF(4f, 4f, width - 4f, 84f), 22f, 22f, paint)
         if (hasMsg) {
             canvas.drawRect(RectF(4f, 60f, width - 4f, 84f), paint)
         }
 
-        // Donor badge circle
         paint.color = Color.argb(55, 255, 255, 255)
         canvas.drawCircle(46f, 44f, 22f, paint)
         paint.color = textColor
@@ -1037,14 +1051,12 @@ object SuperChatOverlayRenderer {
         val initial = sc.donor.firstOrNull()?.uppercaseChar()?.toString() ?: "$"
         canvas.drawText(initial, 39f, 52f, paint)
 
-        // Donor name & donation amount
         paint.textSize = 23f
         canvas.drawText(sc.donor.take(24), 80f, 38f, paint)
 
         paint.textSize = 26f
         canvas.drawText(sc.amountDisplay, 80f, 70f, paint)
 
-        // Super Chat message text
         if (hasMsg) {
             paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
             paint.textSize = 22f
@@ -1357,7 +1369,7 @@ class VideoAnalysisEngine(private val aiClient: UniversalAiClient = UniversalAiC
                 fetchMetadataAndCaptions(cleanUrl, workDir, cookiesFile)
 
                 val infoFile = workDir.listFiles()?.firstOrNull { it.name.endsWith(".info.json") }
-                    ?: return@withContext Result.failure(IllegalStateException("Could not read video metadata. Add cookies.txt or tap 'Update yt-dlp' in Settings."))
+                    ?: return@withContext Result.failure(IllegalStateException("Could not read video metadata. Import cookies.txt or tap 'Update yt-dlp' in Settings."))
 
                 onProgress(0.42f, "Tracing Smart Valley-to-Valley heatmap boundaries...")
                 val info = JSONObject(infoFile.readText(Charsets.UTF_8))
@@ -1530,10 +1542,6 @@ class VideoAnalysisEngine(private val aiClient: UniversalAiClient = UniversalAiC
         }
     }
 
-    /**
-     * Smart Valley-to-Valley Heatmap Boundaries:
-     * Traces backward from each peak to the local valley (setup) and forward to the next valley (punchline).
-     */
     private fun detectValleyToValleyHeatmapPeaks(hm: List<HeatmapPoint>, dur: Double): List<ClipCandidate> {
         if (hm.size < 3) return emptyList()
         val out = mutableListOf<ClipCandidate>()
@@ -1553,11 +1561,9 @@ class VideoAnalysisEngine(private val aiClient: UniversalAiClient = UniversalAiC
                 out.add(ClipCandidate(
                     id = UUID.randomUUID().toString(),
                     title = "Most Replayed Valley-to-Valley (${(peakVal * 100.0).toInt()}%)",
-                    startSec = start,
-                    endSec = end,
+                    startSec = start, endSec = end,
                     hypeScore = (62 + (peakVal * 36.0).toInt()).coerceIn(62, 98),
-                    signals = listOf(SignalSource.HEATMAP),
-                    isMultiSignal = false,
+                    signals = listOf(SignalSource.HEATMAP), isMultiSignal = false,
                     reason = "Valley-to-valley retention arc (${(peakVal * 100.0).toInt()}% peak)"
                 ))
             }
@@ -1643,7 +1649,6 @@ class VideoAnalysisEngine(private val aiClient: UniversalAiClient = UniversalAiC
     }
 }
 ''')
-
 def write_exporter_service_and_ui() -> None:
     w(f"{PKG}/engine/ClipExporter.kt", r'''
 package com.clippulse.studio.engine
@@ -1656,6 +1661,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
+import androidx.documentfile.provider.DocumentFile
 import com.clippulse.studio.data.AiConfigStore
 import com.clippulse.studio.model.*
 import com.yausername.youtubedl_android.YoutubeDL
@@ -1671,7 +1677,8 @@ object ClipExporter {
     fun exportSingleClip(
         context: Context, sourceUrlOrUri: String, isLocalFile: Boolean, localFilePath: String?,
         videoTitle: String, clip: ClipCandidate, clipIndex: Int,
-        quality: DownloadQuality, exportMode: ExportMode, burnSuperChat: Boolean, loudnormEnabled: Boolean, includeTxtNotes: Boolean
+        quality: DownloadQuality, exportMode: ExportMode, storagePreset: StoragePreset, customTreeUri: String?,
+        burnSuperChat: Boolean, loudnormEnabled: Boolean, includeTxtNotes: Boolean
     ): Result<ExportedClipRecord> = runCatching {
         EngineInitializer.ensureInitialized(context).getOrThrow()
         val cookiesFile = AiConfigStore(context).getCookiesFile()
@@ -1700,8 +1707,11 @@ object ClipExporter {
 
             if (!outMp4.exists() || outMp4.length() == 0L) throw IllegalStateException("Rendered MP4 is empty.")
             val fileSize = outMp4.length()
-            val (displayPath, contentUri) = saveVideo(context, outMp4, "$baseName.mp4")
-            if (includeTxtNotes) saveTxt(context, "$baseName.txt", buildNotes(videoTitle, sourceUrlOrUri, clip, quality, exportMode, loudnormEnabled))
+            val (displayPath, contentUri) = saveVideoToDestination(context, outMp4, "$baseName.mp4", storagePreset, customTreeUri)
+            if (includeTxtNotes) {
+                val notes = buildNotes(videoTitle, sourceUrlOrUri, clip, quality, exportMode, loudnormEnabled)
+                saveTxtToDestination(context, "$baseName.txt", notes, customTreeUri)
+            }
 
             ExportedClipRecord(
                 id = UUID.randomUUID().toString(), title = clip.viralTitle.ifBlank { clip.title },
@@ -1718,7 +1728,6 @@ object ClipExporter {
         cleanUrl: String, quality: DownloadQuality, startSec: Double, endSec: Double, outFile: File, cookiesFile: File?
     ) {
         val sectionSpec = "*${TimeFormatter.formatSectionTimestamp(startSec)}-${TimeFormatter.formatSectionTimestamp(endSec)}"
-        // Use web-friendly clients + desktop headers so external FFmpeg section cutting never gets HTTP 403
         val profiles = listOf("tv_embedded,mweb", "ios,web", "default")
         var lastError: Throwable? = null
 
@@ -1732,12 +1741,8 @@ object ClipExporter {
                     addOption("--no-playlist")
                     addOption("--user-agent", StreamPreviewResolver.DESKTOP_UA)
                     addOption("--referer", "https://www.youtube.com/")
-                    if (clientArg != "default") {
-                        addOption("--extractor-args", "youtube:player_client=$clientArg")
-                    }
-                    if (cookiesFile != null) {
-                        addOption("--cookies", cookiesFile.absolutePath)
-                    }
+                    if (clientArg != "default") addOption("--extractor-args", "youtube:player_client=$clientArg")
+                    if (cookiesFile != null) addOption("--cookies", cookiesFile.absolutePath)
                     addOption("-o", outFile.absolutePath)
                 }
                 YoutubeDL.getInstance().execute(req)
@@ -1792,26 +1797,71 @@ object ClipExporter {
         FfmpegRunner.run(context, baseInput + vArgs + fallbackAArgs + listOf("-movflags", "+faststart", outputPath)).getOrThrow()
     }
 
-    private fun saveVideo(context: Context, src: File, name: String): Pair<String, Uri> {
+    private fun saveVideoToDestination(
+        context: Context, src: File, name: String, preset: StoragePreset, customTreeUri: String?
+    ): Pair<String, Uri> {
+        // 1. Custom SAF Folder selected by user
+        if (!customTreeUri.isNullOrBlank()) {
+            val savedCustom = runCatching {
+                val tree = DocumentFile.fromTreeUri(context, Uri.parse(customTreeUri))
+                    ?: throw IllegalStateException("Custom folder permission expired.")
+                tree.findFile(name)?.delete()
+                val doc = tree.createFile("video/mp4", name) ?: throw IllegalStateException("Cannot create MP4 in custom folder.")
+                context.contentResolver.openOutputStream(doc.uri)?.use { out ->
+                    FileInputStream(src).use { it.copyTo(out, 65536) }
+                } ?: throw IllegalStateException("Unable to write to custom folder.")
+                val folderName = AiConfigStore.extractTreeFolderLabel(Uri.parse(customTreeUri))
+                "$folderName / $name" to doc.uri
+            }
+            if (savedCustom.isSuccess) return savedCustom.getOrThrow()
+        }
+
+        // 2. Standard Android 10+ MediaStore (Movies/ClipPulse, Download/ClipPulse, or DCIM/ClipPulse)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val r = context.contentResolver
-            val v = ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, name); put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/ClipPulse"); put(MediaStore.Video.Media.IS_PENDING, 1)
+            val collection = if (preset == StoragePreset.DOWNLOADS) {
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            } else {
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
             }
-            val uri = r.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, v) ?: throw IllegalStateException("MediaStore URI failed.")
+            val v = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, preset.relativeSubdir)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = r.insert(collection, v) ?: throw IllegalStateException("MediaStore URI failed.")
             r.openOutputStream(uri)?.use { out -> FileInputStream(src).use { it.copyTo(out, 65536) } }
-            v.clear(); v.put(MediaStore.Video.Media.IS_PENDING, 0); r.update(uri, v, null, null)
-            return "Movies/ClipPulse/$name" to uri
+            v.clear(); v.put(MediaStore.MediaColumns.IS_PENDING, 0); r.update(uri, v, null, null)
+            return "${preset.relativeSubdir}/$name" to uri
         }
-        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "ClipPulse").apply { mkdirs() }
-        val dst = File(dir, name); FileInputStream(src).use { inp -> FileOutputStream(dst).use { inp.copyTo(it, 65536) } }
+
+        // 3. Android 8/9 Legacy External Storage
+        val basePublicDir = when (preset) {
+            StoragePreset.DOWNLOADS -> Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            StoragePreset.DCIM -> Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+            StoragePreset.MOVIES -> Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+        }
+        val dir = File(basePublicDir, "ClipPulse").apply { mkdirs() }
+        val dst = File(dir, name)
+        FileInputStream(src).use { inp -> FileOutputStream(dst).use { inp.copyTo(it, 65536) } }
         MediaScannerConnection.scanFile(context, arrayOf(dst.absolutePath), arrayOf("video/mp4"), null)
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", dst)
-        return "Movies/ClipPulse/$name" to uri
+        return "${preset.relativeSubdir}/$name" to uri
     }
 
-    private fun saveTxt(context: Context, name: String, content: String) {
+    private fun saveTxtToDestination(context: Context, name: String, content: String, customTreeUri: String?) {
+        if (!customTreeUri.isNullOrBlank()) {
+            val savedCustom = runCatching {
+                val tree = DocumentFile.fromTreeUri(context, Uri.parse(customTreeUri)) ?: return@runCatching false
+                tree.findFile(name)?.delete()
+                val doc = tree.createFile("text/plain", name) ?: return@runCatching false
+                context.contentResolver.openOutputStream(doc.uri)?.use { it.write(content.toByteArray(StandardCharsets.UTF_8)) }
+                true
+            }.getOrDefault(false)
+            if (savedCustom) return
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val r = context.contentResolver
             val v = ContentValues().apply {
@@ -1897,6 +1947,8 @@ class ClipExportService : Service() {
         val title = intent?.getStringExtra("title").orEmpty()
         val quality = runCatching { DownloadQuality.valueOf(intent?.getStringExtra("quality") ?: "") }.getOrDefault(DownloadQuality.Q_1080P)
         val mode = runCatching { ExportMode.valueOf(intent?.getStringExtra("mode") ?: "") }.getOrDefault(ExportMode.FAST_COPY)
+        val storagePreset = runCatching { StoragePreset.valueOf(intent?.getStringExtra("storagePreset") ?: "") }.getOrDefault(StoragePreset.MOVIES)
+        val customTreeUri = intent?.getStringExtra("customTreeUri")
         val burnSc = intent?.getBooleanExtra("burnSc", true) ?: true
         val loudnorm = intent?.getBooleanExtra("loudnorm", true) ?: true
         val txt = intent?.getBooleanExtra("txt", true) ?: true
@@ -1920,7 +1972,7 @@ class ClipExportService : Service() {
                 if (!isActive) break
                 ExportProgressBus.update(ExportJobState.Running(i + 1, clips.size, c.viralTitle.ifBlank { c.title }, i.toFloat() / clips.size))
                 notifySafe(4102, "Exporting ${i + 1}/${clips.size}", c.title, i, clips.size, true)
-                ClipExporter.exportSingleClip(applicationContext, url, isLocal, localPath, title, c, i, quality, mode, burnSc, loudnorm, txt)
+                ClipExporter.exportSingleClip(applicationContext, url, isLocal, localPath, title, c, i, quality, mode, storagePreset, customTreeUri, burnSc, loudnorm, txt)
                     .fold(
                         onSuccess = { rec ->
                             saved.add(rec.displayPath)
@@ -1933,7 +1985,7 @@ class ClipExportService : Service() {
             if (isActive) {
                 if (saved.isNotEmpty()) {
                     ExportProgressBus.update(ExportJobState.Completed(saved.size, saved))
-                    notifySafe(4103, "Export Complete", "Saved ${saved.size} clip(s) to Movies/ClipPulse", 0, 0, false)
+                    notifySafe(4103, "Export Complete", "Saved ${saved.size} clip(s)", 0, 0, false)
                 } else {
                     ExportProgressBus.update(ExportJobState.Failed(err ?: "Export failed"))
                     notifySafe(4103, "Export Failed", err ?: "Export failed", 0, 0, false)
@@ -1962,12 +2014,15 @@ class ClipExportService : Service() {
 
         fun startExport(
             ctx: Context, url: String, isLocal: Boolean, localPath: String?, title: String,
-            clips: List<ClipCandidate>, quality: DownloadQuality, mode: ExportMode, burnSc: Boolean, loudnorm: Boolean, txt: Boolean
+            clips: List<ClipCandidate>, quality: DownloadQuality, mode: ExportMode,
+            storagePreset: StoragePreset, customTreeUri: String?,
+            burnSc: Boolean, loudnorm: Boolean, txt: Boolean
         ) {
             ExportProgressBus.pendingClips = clips
             ContextCompat.startForegroundService(ctx, Intent(ctx, ClipExportService::class.java).apply {
                 putExtra("url", url); putExtra("local", isLocal); putExtra("path", localPath)
                 putExtra("title", title); putExtra("quality", quality.name); putExtra("mode", mode.name)
+                putExtra("storagePreset", storagePreset.name); putExtra("customTreeUri", customTreeUri)
                 putExtra("burnSc", burnSc); putExtra("loudnorm", loudnorm); putExtra("txt", txt)
             })
         }
@@ -1984,6 +2039,7 @@ class ClipExportService : Service() {
 package com.clippulse.studio.viewmodel
 
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -2141,20 +2197,14 @@ class ClipPulseViewModel(app: Application) : AndroidViewModel(app) {
         ensureLiveStreamPreviewUrl()
     }
 
-    // Scan History Actions
     fun loadCachedScan(scan: VideoAnalysisResult) {
         val firstId = scan.clips.firstOrNull()?.id
         _ui.update {
             it.copy(
-                activeTab = StudioTab.STUDIO,
-                sourceInput = scan.sourceUrlOrUri,
-                analysisResult = scan,
-                analysisError = null,
-                activeSignalFilter = null,
-                expandedClipId = firstId,
-                focusedClipId = firstId,
-                resolvedStreamInfo = null,
-                previewError = null
+                activeTab = StudioTab.STUDIO, sourceInput = scan.sourceUrlOrUri,
+                analysisResult = scan, analysisError = null, activeSignalFilter = null,
+                expandedClipId = firstId, focusedClipId = firstId,
+                resolvedStreamInfo = null, previewError = null
             )
         }
         if (firstId != null && !scan.isLocalFile) ensureLiveStreamPreviewUrl()
@@ -2165,7 +2215,6 @@ class ClipPulseViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(scanHistory = emptyList()) }
     }
 
-    // Cookies.txt Login Actions
     fun importCookiesUri(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             val ok = runCatching {
@@ -2188,12 +2237,24 @@ class ClipPulseViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(hasCookiesLoaded = false, ytDlpUpdateStatus = "Login cookies cleared.") }
     }
 
-    // Download Settings Controls
+    // Download & Custom Storage Controls
     private fun saveDl(fn: (DownloadSettings) -> DownloadSettings) = _ui.update { st ->
         val u = fn(st.downloadSettings); store.saveDownloadSettings(u); st.copy(downloadSettings = u)
     }
     fun setDownloadQuality(q: DownloadQuality) = saveDl { it.copy(quality = q) }
     fun setExportMode(m: ExportMode) = saveDl { it.copy(exportMode = m) }
+    fun setStoragePreset(preset: StoragePreset) = saveDl {
+        it.copy(storagePreset = preset, customTreeUri = null, customTreeLabel = null)
+    }
+    fun setCustomStorageTreeUri(treeUri: Uri) {
+        runCatching {
+            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            getApplication<Application>().contentResolver.takePersistableUriPermission(treeUri, flags)
+        }
+        val label = AiConfigStore.extractTreeFolderLabel(treeUri)
+        saveDl { it.copy(customTreeUri = treeUri.toString(), customTreeLabel = label) }
+    }
+    fun clearCustomStorageFolder() = saveDl { it.copy(customTreeUri = null, customTreeLabel = null) }
     fun toggleBurnSuperChatOverlay() = saveDl { it.copy(burnSuperChatOverlay = !it.burnSuperChatOverlay) }
     fun toggleLoudnorm() = saveDl { it.copy(loudnormEnabled = !it.loudnormEnabled) }
     fun toggleIncludeTxtNotes() = saveDl { it.copy(includeTxtNotes = !it.includeTxtNotes) }
@@ -2269,7 +2330,8 @@ class ClipPulseViewModel(app: Application) : AndroidViewModel(app) {
             val dl = s.downloadSettings
             ClipExportService.startExport(
                 getApplication(), r.sourceUrlOrUri, r.isLocalFile, r.localFilePath, r.videoTitle,
-                chosen, dl.quality, dl.exportMode, dl.burnSuperChatOverlay, dl.loudnormEnabled, dl.includeTxtNotes
+                chosen, dl.quality, dl.exportMode, dl.storagePreset, dl.customTreeUri,
+                dl.burnSuperChatOverlay, dl.loudnormEnabled, dl.includeTxtNotes
             )
             _ui.update { it.copy(activeTab = StudioTab.DOWNLOADS) }
         }
@@ -2487,7 +2549,6 @@ fun LiveClipPreviewPlayer(
     var playing by remember { mutableStateOf(false) }
     var currentSec by remember { mutableStateOf(startSec) }
 
-    // Drag-to-Trim RangeSlider window (±25s around the clip inside total video bounds)
     val safeTotal = totalDurationSec.coerceAtLeast(endSec + 5.0).coerceAtLeast(10.0)
     val windowMin = (startSec - 25.0).coerceAtLeast(0.0).toFloat()
     val windowMax = (endSec + 25.0).coerceAtMost(safeTotal).coerceAtLeast(windowMin + 5f).toFloat()
@@ -2500,7 +2561,7 @@ fun LiveClipPreviewPlayer(
             .setAllowCrossProtocolRedirects(true)
         val dataSourceFactory = DefaultDataSource.Factory(ctx, httpFactory)
         ExoPlayer.Builder(ctx)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(ctx).setDataSourceFactory(dataSourceFactory))
             .build()
             .apply {
                 setMediaItem(MediaItem.fromUri(mediaUri))
@@ -2565,30 +2626,19 @@ fun LiveClipPreviewPlayer(
                 Text("${TimeFormatter.formatTimestamp(currentSec.coerceIn(startSec, endSec))} / ${TimeFormatter.formatTimestamp(endSec)}", color = TextSecondary, fontSize = 11.sp)
             }
 
-            // Drag-to-Trim RangeSlider directly on the video preview
             Text(
                 text = "DRAG TO TRIM: ${TimeFormatter.formatTimestamp(sliderRange.start.toDouble())} – ${TimeFormatter.formatTimestamp(sliderRange.endInclusive.toDouble())}",
-                color = ColorGold,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold
+                color = ColorGold, fontSize = 10.sp, fontWeight = FontWeight.Bold
             )
             RangeSlider(
                 value = sliderRange,
-                onValueChange = { range ->
-                    if (range.endInclusive - range.start >= 2f) {
-                        sliderRange = range
-                    }
-                },
+                onValueChange = { range -> if (range.endInclusive - range.start >= 2f) sliderRange = range },
                 onValueChangeFinished = {
                     onRangeDragged(sliderRange.start.toDouble(), sliderRange.endInclusive.toDouble())
                     player.seekTo((sliderRange.start * 1000f).toLong())
                 },
                 valueRange = windowMin..windowMax,
-                colors = SliderDefaults.colors(
-                    thumbColor = ColorGold,
-                    activeTrackColor = ElectricIndigo,
-                    inactiveTrackColor = MatteSlate
-                ),
+                colors = SliderDefaults.colors(thumbColor = ColorGold, activeTrackColor = ElectricIndigo, inactiveTrackColor = MatteSlate),
                 modifier = Modifier.fillMaxWidth().height(32.dp)
             )
         }
@@ -2814,7 +2864,6 @@ fun AiManagerSheet(
             }
             HorizontalDivider(color = HairlineBorder)
 
-            // Login Support (cookies.txt importer)
             Text("YOUTUBE / FACEBOOK LOGIN COOKIES (cookies.txt)", color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             Text("Bypass HTTP 403 anti-bot checks, age-restricted videos & members-only streams.", color = TextMuted, fontSize = 11.sp)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2883,6 +2932,9 @@ fun ClipPulseStudioScreen(viewModel: ClipPulseViewModel) {
     val ctx = LocalContext.current
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) viewModel.analyzeLocalVideoUri(uri) }
     val cookiesPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) viewModel.importCookiesUri(uri) }
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
+        if (treeUri != null) viewModel.setCustomStorageTreeUri(treeUri)
+    }
     val notifPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { viewModel.exportSelectedClips() }
 
     var showManualDialog by remember { mutableStateOf(false) }
@@ -2967,6 +3019,9 @@ fun ClipPulseStudioScreen(viewModel: ClipPulseViewModel) {
                 modifier = Modifier.fillMaxSize().padding(pad),
                 settings = dl, exportState = exportState, history = state.downloadHistory,
                 onSelectQuality = viewModel::setDownloadQuality, onSelectMode = viewModel::setExportMode,
+                onSelectStoragePreset = viewModel::setStoragePreset,
+                onPickCustomStorageFolder = { folderPicker.launch(null) },
+                onClearCustomStorageFolder = viewModel::clearCustomStorageFolder,
                 onToggleBurnSc = viewModel::toggleBurnSuperChatOverlay,
                 onToggleLoudnorm = viewModel::toggleLoudnorm, onToggleTxt = viewModel::toggleIncludeTxtNotes,
                 onCancelExport = viewModel::cancelActiveExport, onDismissExport = viewModel::dismissExportStatus,
@@ -3031,7 +3086,6 @@ fun ClipPulseStudioScreen(viewModel: ClipPulseViewModel) {
                     }
                 }
 
-                // Saved Scan History Bar (instant reload of past scans)
                 if (state.scanHistory.isNotEmpty()) {
                     item {
                         Surface(modifier = Modifier.fillMaxWidth(), color = MatteSlate, shape = RoundedCornerShape(14.dp), border = BorderStroke(1.dp, HairlineBorder)) {
@@ -3138,6 +3192,9 @@ private fun DownloadsControlCenter(
     history: List<ExportedClipRecord>,
     onSelectQuality: (DownloadQuality) -> Unit,
     onSelectMode: (ExportMode) -> Unit,
+    onSelectStoragePreset: (StoragePreset) -> Unit,
+    onPickCustomStorageFolder: () -> Unit,
+    onClearCustomStorageFolder: () -> Unit,
     onToggleBurnSc: () -> Unit,
     onToggleLoudnorm: () -> Unit,
     onToggleTxt: () -> Unit,
@@ -3164,7 +3221,7 @@ private fun DownloadsControlCenter(
                         }
                         is ExportJobState.Completed -> {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                Text("\u2713 Exported ${exportState.exportedCount} clip(s) to Movies/ClipPulse", color = ColorEmerald, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                Text("\u2713 Exported ${exportState.exportedCount} clip(s) to ${settings.activeDestinationLabel()}", color = ColorEmerald, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                                 TextButton(onClick = onDismissExport) { Text("OK", color = ColorEmerald) }
                             }
                         }
@@ -3182,6 +3239,40 @@ private fun DownloadsControlCenter(
             }
         }
 
+        // Storage Destination & Folder Picker Card
+        item {
+            Surface(modifier = Modifier.fillMaxWidth(), color = MatteSlate, shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, ColorCyan.copy(alpha = 0.35f))) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("STORAGE LOCATION FOR DOWNLOADED FILES", color = ColorCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text("Active Folder: ${settings.activeDestinationLabel()}", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        StoragePreset.entries.forEach { preset ->
+                            FilterChip(
+                                selected = settings.customTreeUri == null && settings.storagePreset == preset,
+                                onClick = { onSelectStoragePreset(preset) },
+                                label = { Text(preset.label, fontSize = 11.sp) }
+                            )
+                        }
+                    }
+
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onPickCustomStorageFolder, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Rounded.FolderOpen, "Pick Folder", tint = ColorCyan, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (settings.customTreeUri != null) "Change Custom Folder" else "Choose Custom Folder...", color = ColorCyan, fontSize = 12.sp)
+                        }
+                        if (settings.customTreeUri != null) {
+                            OutlinedButton(onClick = onClearCustomStorageFolder, border = BorderStroke(1.dp, TextMuted)) {
+                                Text("Reset", color = TextSecondary, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Encoding & Effects Card
         item {
             Surface(modifier = Modifier.fillMaxWidth(), color = MatteSlate, shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, HairlineBorder)) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -3215,11 +3306,10 @@ private fun DownloadsControlCenter(
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("Save Sidecar .TXT Viral Copy Pack", color = TextPrimary, fontSize = 13.sp)
-                            Text("Saves title, hashtags & transcript to Documents/ClipPulse", color = TextMuted, fontSize = 11.sp)
+                            Text("Saves title, hashtags & transcript alongside your clip", color = TextMuted, fontSize = 11.sp)
                         }
                         Switch(checked = settings.includeTxtNotes, onCheckedChange = { onToggleTxt() })
                     }
-                    Text("Gallery Output Folder: Internal Storage / Movies / ClipPulse", color = ColorCyan, fontSize = 11.sp)
                 }
             }
         }
@@ -3268,10 +3358,11 @@ def main() -> None:
     write_core_kotlin()
     write_network_and_engines()
     write_exporter_service_and_ui()
-    print("\nClipPulse v2.0.0 Android project generated successfully!")
+    print("\nClipPulse v2.1.0 Android project generated successfully!")
 
 
 if __name__ == "__main__":
     main()
     sys.exit(0)
+
 
