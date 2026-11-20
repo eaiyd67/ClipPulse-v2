@@ -1,0 +1,51 @@
+name: Build ClipPulse Debug APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Assemble Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Accept Android SDK Licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+      - name: Generate ClipPulse Android Project
+        run: python3 build_project.py
+
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build Debug APK
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log || {
+            echo "==================== BUILD FAILURE SUMMARY ===================="
+            grep -E "(^e: |FAILURE:|What went wrong:|Execution failed|Unresolved reference|Manifest merger failed)" build.log | head -n 60
+            tail -n 35 build.log
+            exit 1
+          }
+
+      - name: Upload ClipPulse Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipPulse-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
