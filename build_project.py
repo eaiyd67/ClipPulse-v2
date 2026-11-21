@@ -647,7 +647,7 @@ class AiConfigStore(context: Context) {
         }
 
         fun extractTreeFolderLabel(treeUri: Uri): String {
-            val last = Uri.decode(treeUri.lastPathSegment ?: "Custom Folder")
+            val last = Uri.decode(treeUri.lastPathSegment ?: "Custom Folder") ?: "Custom Folder"
             return last.replace("primary:", "Internal Storage / ").replace(":", " / ")
         }
     }
@@ -1648,7 +1648,6 @@ class VideoAnalysisEngine(private val aiClient: UniversalAiClient = UniversalAiC
     }
 }
 ''')
-
 def write_exporter_service_and_ui() -> None:
     w(f"{PKG}/engine/ClipExporter.kt", r'''
 package com.clippulse.studio.engine
@@ -2547,8 +2546,10 @@ fun LiveClipPreviewPlayer(
 
     val safeTotal = totalDurationSec.coerceAtLeast(endSec + 5.0).coerceAtLeast(10.0)
     val windowMin = (startSec - 25.0).coerceAtLeast(0.0).toFloat()
-    val windowMax = (endSec + 25.0).coerceAtMost(safeTotal).coerceAtLeast(windowMin + 5f).toFloat()
-    var sliderRange by remember(startSec, endSec) { mutableStateOf(startSec.toFloat()..endSec.toFloat()) }
+    val windowMax = (endSec + 25.0).coerceAtMost(safeTotal).toFloat().coerceAtLeast(windowMin + 5f)
+    val initStart = startSec.toFloat().coerceIn(windowMin, windowMax)
+    val initEnd = endSec.toFloat().coerceIn(initStart, windowMax)
+    var sliderRange by remember(startSec, endSec) { mutableStateOf(initStart..initEnd) }
 
     val player = remember(mediaUri) {
         val httpFactory = DefaultHttpDataSource.Factory()
@@ -3358,4 +3359,5 @@ def main() -> None:
 if __name__ == "__main__":
     main()
     sys.exit(0)
+    
     
