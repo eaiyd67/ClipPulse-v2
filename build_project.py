@@ -653,8 +653,6 @@ class AiConfigStore(context: Context) {
     }
 }
 ''')
-
-
 def write_network_and_engines() -> None:
     w(f"{PKG}/network/UniversalAiClient.kt", r'''
 package com.clippulse.studio.network
@@ -1650,6 +1648,7 @@ class VideoAnalysisEngine(private val aiClient: UniversalAiClient = UniversalAiC
     }
 }
 ''')
+
 def write_exporter_service_and_ui() -> None:
     w(f"{PKG}/engine/ClipExporter.kt", r'''
 package com.clippulse.studio.engine
@@ -1801,7 +1800,6 @@ object ClipExporter {
     private fun saveVideoToDestination(
         context: Context, src: File, name: String, preset: StoragePreset, customTreeUri: String?
     ): Pair<String, Uri> {
-        // 1. Custom SAF Folder selected by user
         if (!customTreeUri.isNullOrBlank()) {
             val savedCustom = runCatching {
                 val tree = DocumentFile.fromTreeUri(context, Uri.parse(customTreeUri))
@@ -1817,7 +1815,6 @@ object ClipExporter {
             if (savedCustom.isSuccess) return savedCustom.getOrThrow()
         }
 
-        // 2. Standard Android 10+ MediaStore (Movies/ClipPulse, Download/ClipPulse, or DCIM/ClipPulse)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val r = context.contentResolver
             val collection = if (preset == StoragePreset.DOWNLOADS) {
@@ -1837,7 +1834,6 @@ object ClipExporter {
             return "${preset.relativeSubdir}/$name" to uri
         }
 
-        // 3. Android 8/9 Legacy External Storage
         val basePublicDir = when (preset) {
             StoragePreset.DOWNLOADS -> Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             StoragePreset.DCIM -> Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
@@ -2238,7 +2234,6 @@ class ClipPulseViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(hasCookiesLoaded = false, ytDlpUpdateStatus = "Login cookies cleared.") }
     }
 
-    // Download & Custom Storage Controls
     private fun saveDl(fn: (DownloadSettings) -> DownloadSettings) = _ui.update { st ->
         val u = fn(st.downloadSettings); store.saveDownloadSettings(u); st.copy(downloadSettings = u)
     }
@@ -2501,8 +2496,8 @@ fun InteractiveHeatmapTimeline(durationSec: Double, heatmap: List<HeatmapPoint>,
             }
             Spacer(Modifier.height(8.dp))
             Canvas(modifier = Modifier.fillMaxWidth().height(82.dp)
-                .pointerInput(safeDur, clips) { detectTapGestures { onJumpToTime((it.x / size.width).coerceIn(0f, 1f) * safeDur) } }
-                .pointerInput(safeDur, clips) { detectHorizontalDragGestures { ch, _ -> onJumpToTime((ch.position.x / size.width).coerceIn(0f, 1f) * safeDur) } }
+                .pointerInput(safeDur, clips) { detectTapGestures { onJumpToTime(((it.x / size.width).coerceIn(0f, 1f)).toDouble() * safeDur) } }
+                .pointerInput(safeDur, clips) { detectHorizontalDragGestures { ch, _ -> onJumpToTime(((ch.position.x / size.width).coerceIn(0f, 1f)).toDouble() * safeDur) } }
             ) {
                 val w = size.width; val h = size.height
                 drawRoundRect(ElevatedSlate, size = Size(w, h))
@@ -3240,7 +3235,6 @@ private fun DownloadsControlCenter(
             }
         }
 
-        // Storage Destination & Folder Picker Card
         item {
             Surface(modifier = Modifier.fillMaxWidth(), color = MatteSlate, shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, ColorCyan.copy(alpha = 0.35f))) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -3273,7 +3267,6 @@ private fun DownloadsControlCenter(
             }
         }
 
-        // Encoding & Effects Card
         item {
             Surface(modifier = Modifier.fillMaxWidth(), color = MatteSlate, shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, HairlineBorder)) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -3365,4 +3358,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
     sys.exit(0)
-
+    
